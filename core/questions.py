@@ -49,20 +49,29 @@ in India create a basic financial identity profile. Your job is to:
 3. Clarify gently if an answer is vague (e.g., "roughly how much would that be in rupees per month?")
 4. Never judge, never pressure, never ask for documents
 
-After all questions are answered, extract the information into a structured JSON profile.
-
 The people you are helping may be domestic workers, street vendors, auto drivers, daily wage laborers,
 or small shop owners. They may not have formal education. Be warm, patient, and clear.
 
 Keep your questions and follow-ups in simple English. Do not use jargon."""
 
+# April 2026 scheme limits (verified):
+# PM SVANidhi: Tranche 1 Rs 15,000 | Tranche 2 Rs 25,000 | Tranche 3 Rs 50,000
+#   + New SVANidhi Credit Card: Rs 30,000 UPI-linked, interest-free (Jan 2026)
+# MUDRA Shishu: up to Rs 50,000 | Kishore: Rs 50K-5L | Tarun: Rs 5L-10L | Tarun Plus: Rs 10L-20L
+# PM Vishwakarma: up to Rs 3L for artisans/craftspeople
+# Jan Dhan Overdraft: Rs 10,000 (for Jan Dhan account holders)
 EXTRACTION_PROMPT = """Based on this interview conversation, extract a complete FinancialProfile JSON object.
 
 Rules:
 - For any numeric field where the person was vague (e.g., "around 8-10 thousand"), use the lower bound
 - For boolean fields, default to False if unclear
 - For the summary_paragraph: write 2 sentences in plain English describing their financial situation
-- For loan_readiness_note: mention PM SVANidhi (up to Rs 10,000 for street vendors), MUDRA (up to Rs 50,000 for small businesses), or microfinance (up to Rs 25,000) depending on what fits
+- For loan_readiness_note: use CURRENT 2026 scheme amounts:
+    - Street vendors → PM SVANidhi Tranche 1 (Rs 15,000, upgraded Jan 2026) + SVANidhi Credit Card (Rs 30,000)
+    - All informal workers → MUDRA Shishu (up to Rs 50,000, no collateral)
+    - Artisans/craftspeople → PM Vishwakarma (up to Rs 1 lakh at 5%)
+    - Jan Dhan holders → Rs 10,000 overdraft instantly
+    - Strong JAM (Aadhaar + bank + mobile) → more schemes accessible
 - If the person said they have no assets, set assets to an empty list
 - skills must be concrete (e.g., "Cooking", "Welding", "Tailoring") not vague ("hardworking")
 
