@@ -1,4 +1,22 @@
+![Python 3.11](https://img.shields.io/badge/python-3.11-blue)
+![Claude API](https://img.shields.io/badge/LLM-Claude%20API-blueviolet)
+![Pydantic](https://img.shields.io/badge/validation-Pydantic-orange)
+![License: MIT](https://img.shields.io/badge/license-MIT-green)
+
 # InformalID — AI financial profiler for India's cash-only informal workers
+
+## Impact
+
+India's informal economy employs **490 million workers** — roughly 83% of the total workforce
+(Periodic Labour Force Survey, 2023). NITI Aayog's roadmap for financial inclusion identifies
+the absence of formal income documentation as a primary barrier to credit access for this
+population. The PM SVANidhi scheme has disbursed over Rs 10,000 crore in micro-loans to 78
+lakh+ street vendors, but onboarding each applicant still requires manual intake that takes
+30-60 minutes per person. MUDRA loans face the same bottleneck.
+
+InformalID compresses that intake into a 5-minute AI conversation — producing a structured,
+validated financial identity card that a loan officer or MFI can use immediately. No documents
+required. No digital footprint assumed.
 
 ## The Problem
 
@@ -67,7 +85,7 @@ Formatted card + JSON output (for loan officers / MFIs)
 ## Run It
 
 ```bash
-git clone [private — available on request]
+git clone https://github.com/rakshithmuda22/informalid.git
 cd informalid
 cp .env.example .env  # add your ANTHROPIC_API_KEY
 pip install -r requirements.txt
@@ -75,6 +93,77 @@ python demo/demo.py
 ```
 
 Demo runs in mock mode without an API key — shows a full sample interview + formatted card.
+
+## Demo Output
+
+Running `python demo/demo.py` produces a complete financial identity card:
+
+```
+══════════════════════════════════════════════════════════════
+  INFORMALID — FINANCIAL IDENTITY CARD
+══════════════════════════════════════════════════════════════
+  Name:                  Meena Devi
+  Age:                   35
+  Occupation:            Domestic worker (house cleaning)
+  Experience:            8 years
+  Employer count:        3 households (daily)
+  Total monthly income:  Rs 9,000
+  Income stability:      Stable — same clients for 4+ years
+  Monthly expenses:      Rs 7,000
+  Monthly savings:       Rs 2,000
+  Existing debt:         None
+  Bank account:          Savings account (Jan Dhan)
+  Dependents:            2 children (school-age)
+  Loan readiness:        Eligible for PM SVANidhi up to Rs 10,000
+══════════════════════════════════════════════════════════════
+  Generated: 2026-04-13 | Source: 7-question AI interview
+  Validation: All fields passed Pydantic schema check
+══════════════════════════════════════════════════════════════
+```
+
+The same data is also available as validated JSON for programmatic use by loan officers and MFIs.
+
+## Architecture
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                    InformalID Pipeline                       │
+├─────────────────────────────────────────────────────────────┤
+│                                                             │
+│   CALL 1: Conversational Interview                          │
+│   ┌───────────┐    7 questions     ┌──────────────────┐    │
+│   │   Worker   │ ────────────────→ │  Claude (warm,    │    │
+│   │  (Meena)   │ ←──────────────── │  no jargon,       │    │
+│   └───────────┘   natural Hindi/   │  follow-ups)      │    │
+│                    English mix      └──────────────────┘    │
+│                                                             │
+│   CALL 2: Structured Extraction                             │
+│   ┌──────────────────┐             ┌──────────────────┐    │
+│   │  Full transcript  │ ──────────→│  Claude (strict   │    │
+│   │  from Call 1      │            │  JSON extraction) │    │
+│   └──────────────────┘             └────────┬─────────┘    │
+│                                              │              │
+│                                              ▼              │
+│                                    ┌──────────────────┐    │
+│                                    │  Pydantic model   │    │
+│                                    │  validation       │    │
+│                                    │  (FinancialProfile)│    │
+│                                    └────────┬─────────┘    │
+│                                              │              │
+│                              ┌───────────────┼────────┐    │
+│                              ▼               ▼        │    │
+│                     ┌──────────────┐ ┌────────────┐   │    │
+│                     │ Formatted ID │ │ JSON output │   │    │
+│                     │ card (human) │ │ (machine)   │   │    │
+│                     └──────────────┘ └────────────┘   │    │
+│                                                       │    │
+└─────────────────────────────────────────────────────────────┘
+```
+
+**Why two calls, not one:** The interview call is conversational — warm, simple, no jargon.
+The extraction call is mechanical — strict JSON schema, no personality. Combining them would
+leak the schema into the conversation (bad UX) or soften the extraction (bad data). Separating
+them means each call does one thing well.
 
 ## Technical Decisions
 
@@ -100,6 +189,13 @@ pytest tests/ -v
 # tests/test_integration.py::test_full_mock_pipeline PASSED
 # tests/test_integration.py::test_profile_values_are_internally_consistent PASSED
 ```
+
+## Built With
+
+- **Python 3.11** — core language
+- **Anthropic Claude API** — conversational interview and structured extraction (two-call architecture)
+- **Pydantic** — schema validation for `FinancialProfile` (guarantees no silent bad data)
+- **pytest** — test suite covering model validation, income math, and full pipeline integration
 
 ## What's Missing / What's Next
 
