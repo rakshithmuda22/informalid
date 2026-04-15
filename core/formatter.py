@@ -70,7 +70,7 @@ def format_card(
             schemes_section += f"    Max: {fmt_inr(scheme.max_amount_inr)} | {scheme.description[:80]}...\n" if len(scheme.description) > 80 else f"    Max: {fmt_inr(scheme.max_amount_inr)} | {scheme.description}\n"
             schemes_section += f"    → {scheme.action_required}\n"
         if check:
-            schemes_section += f"\n  ADDITIONAL SCHEMES (after completing prerequisites)\n"
+            schemes_section += "\n  ADDITIONAL SCHEMES (after completing prerequisites)\n"
             for scheme in check:
                 schemes_section += f"  ○ {scheme.name} (up to {fmt_inr(scheme.max_amount_inr)}) — {scheme.eligibility_reason}\n"
 

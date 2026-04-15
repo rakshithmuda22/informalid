@@ -3,7 +3,6 @@ core/models.py — Pydantic data models for the financial identity profile.
 Pure data — no API calls, no side effects.
 """
 from __future__ import annotations
-from typing import Optional
 from pydantic import BaseModel, ConfigDict, Field
 
 
@@ -60,27 +59,27 @@ class FinancialProfile(BaseModel):
     )
 
     model_config = ConfigDict(json_schema_extra={
-            "example": {
-                "full_name": "Meena Devi",
-                "age": 34,
-                "occupation": "Domestic worker",
-                "years_in_occupation": 8,
-                "income_sources": [
-                    {"description": "Cleaning 3 households", "frequency": "monthly", "estimated_monthly_inr": 9000}
-                ],
-                "total_monthly_income_inr": 9000,
-                "monthly_expenses_inr": 6500,
-                "monthly_savings_inr": 2500,
-                "assets": [{"item": "Mobile phone", "estimated_value_inr": 4000}],
-                "has_bank_account": False,
-                "has_aadhaar": True,
-                "has_mobile_phone": True,
-                "previous_occupations": ["Factory worker"],
-                "skills": ["Cleaning", "Cooking", "Child care"],
-                "references_available": True,
-                "location_city_or_area": "Bangalore, Koramangala",
-                "languages_spoken": ["Hindi", "Kannada"],
-                "summary_paragraph": "Meena Devi is a domestic worker with 8 years of consistent income serving 3 households in Koramangala. She saves approximately Rs 2,500 per month and has no formal debt history.",
-                "loan_readiness_note": "Eligible for PM SVANidhi-style micro-loan up to Rs 10,000 based on income stability and Aadhaar verification."
-            }
-        })
+        "example": {
+            "full_name": "Meena Devi",
+            "age": 34,
+            "occupation": "Domestic worker",
+            "years_in_occupation": 8,
+            "income_sources": [
+                {"description": "Cleaning 3 households", "frequency": "monthly", "estimated_monthly_inr": 9000}
+            ],
+            "total_monthly_income_inr": 9000,
+            "monthly_expenses_inr": 6500,
+            "monthly_savings_inr": 2500,
+            "assets": [{"item": "Mobile phone", "estimated_value_inr": 4000}],
+            "has_bank_account": False,
+            "has_aadhaar": True,
+            "has_mobile_phone": True,
+            "previous_occupations": ["Factory worker"],
+            "skills": ["Cleaning", "Cooking", "Child care"],
+            "references_available": True,
+            "location_city_or_area": "Bangalore, Koramangala",
+            "languages_spoken": ["Hindi", "Kannada"],
+            "summary_paragraph": "Meena Devi is a domestic worker with 8 years of consistent income.",
+            "loan_readiness_note": "Eligible for PM SVANidhi micro-loan up to Rs 10,000."
+        }
+    })
