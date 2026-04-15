@@ -9,7 +9,6 @@ Extraction uses tool-use forcing — Claude MUST call the extraction tool,
 so the JSON is guaranteed to match the schema. No regex or markdown stripping.
 """
 from __future__ import annotations
-import json
 from typing import Literal
 
 from core.models import FinancialProfile

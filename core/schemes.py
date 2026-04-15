@@ -12,7 +12,6 @@ Sources verified:
 """
 from __future__ import annotations
 from dataclasses import dataclass
-from typing import Optional
 from core.models import FinancialProfile
 
 

@@ -3,6 +3,7 @@ core/formatter.py — Formats a FinancialProfile into readable terminal output.
 No API calls. Pure string formatting.
 """
 from __future__ import annotations
+from datetime import date
 from core.models import FinancialProfile
 
 
@@ -76,7 +77,7 @@ def format_card(
     card = f"""
 {BORDER}
   INFORMALID — FINANCIAL IDENTITY CARD
-  Generated: 2026-04-12  |  Method: AI Conversational Interview
+  Generated: {date.today().isoformat()}  |  Method: AI Conversational Interview
 {BORDER}{mock_banner}
   PERSONAL INFORMATION
   {THIN}

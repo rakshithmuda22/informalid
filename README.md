@@ -196,7 +196,7 @@ pytest tests/ -v
 # Expected output:
 # tests/test_core.py::TestFinancialProfileModel::test_mock_profile_is_valid PASSED
 # tests/test_core.py::TestFinancialProfileModel::test_income_math PASSED
-# ... (20+ tests)
+# ... (61 tests total)
 # tests/test_integration.py::test_full_mock_pipeline PASSED
 # tests/test_integration.py::test_profile_values_are_internally_consistent PASSED
 ```
