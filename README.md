@@ -94,6 +94,17 @@ python demo/demo.py
 
 Demo runs in mock mode without an API key — shows a full sample interview + formatted card.
 
+## Running tests
+
+```bash
+git clone https://github.com/rakshithmuda22/informalid.git
+cd informalid
+pip install -r requirements.txt
+pytest tests/ -v
+```
+
+All tests use mocks — no `ANTHROPIC_API_KEY` required.
+
 ## Demo Output
 
 Running `python demo/demo.py` produces a complete financial identity card:
