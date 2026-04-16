@@ -19,7 +19,10 @@ ANTHROPIC_API_KEY: str = os.getenv("ANTHROPIC_API_KEY", "")
 # "live" uses the real API; "mock" runs without any API key
 INFORMALID_MODE: str = os.getenv("INFORMALID_MODE", "mock" if not ANTHROPIC_API_KEY else "live")
 
-CLAUDE_MODEL: str = "claude-sonnet-4-6"
+# Pin to a real, currently-served Anthropic model ID. The previous
+# value "claude-sonnet-4-6" was not a valid API identifier, so live
+# mode would 404. Override via env if needed.
+CLAUDE_MODEL: str = os.getenv("CLAUDE_MODEL", "claude-sonnet-4-5")
 
 def is_mock_mode() -> bool:
     return INFORMALID_MODE == "mock" or not ANTHROPIC_API_KEY
