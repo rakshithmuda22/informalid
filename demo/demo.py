@@ -1,91 +1,72 @@
 """
-demo/demo.py — Shows InformalID's value in under 60 seconds.
+demo/demo.py - run the full InformalID flow end to end.
 
-Run:
-    python demo/demo.py                     # both personas
-    python demo/demo.py --persona vendor    # street vendor only
-    python demo/demo.py --persona domestic  # domestic worker only
+    python demo/demo.py                     # offline: scripted worker + scripted extraction (no API key)
+    python demo/demo.py --persona vendor    # one persona only (vendor | domestic | both)
+    python demo/demo.py --json              # also print the validated profile as JSON
+    ANTHROPIC_API_KEY=... python demo/demo.py   # live: you answer the 7 questions, Claude extracts
 
-Works WITHOUT an API key (mock mode). Set ANTHROPIC_API_KEY in .env for live interviews.
+Offline mode runs the same code path as live mode (question loop, Claude-written follow-up, tool-use
+extraction, Pydantic validation, scheme matching) against core.mock.ScriptedClient.
 """
-import sys
-import os
 import argparse
+import os
+import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-import config
-from core.profiler import run_profiler
-from core.formatter import format_card, format_json
-from core.schemes import match_schemes, jam_assessment
+import config  # noqa: E402
+from core.formatter import format_card, format_json  # noqa: E402
+from core.mock import PERSONAS  # noqa: E402
+from core.money import format_inr  # noqa: E402
+from core.profiler import run_profiler  # noqa: E402
+from core.schemes import jam_assessment, match_schemes  # noqa: E402
+
+BORDER = "=" * 64
+
+PERSONA_KEYS = {"domestic": "domestic_worker", "vendor": "street_vendor"}
 
 
-def show_persona(persona_key: str, persona_label: str, mock_mode: bool):
-    BORDER = "=" * 64
-    THIN = "-" * 64
+def show_persona(key: str, mock_mode: bool, as_json: bool) -> None:
+    label = PERSONAS[key].label if mock_mode else "Live interview"
+    print(f"\n{BORDER}\n  {label.upper()}\n{BORDER}")
 
-    print(f"\n{BORDER}")
-    print(f"  PERSONA: {persona_label.upper()}")
-    print(BORDER)
+    def say(speaker: str, text: str) -> None:
+        print(f"\n  [{speaker}] {text}" if speaker == "InformalID" else f"  [{speaker}] {text}")
 
-    conversation, profile = run_profiler(persona=persona_key)
+    conversation, profile = run_profiler(persona=key, say=say if mock_mode else None)
+    print("\n\n  Profile extracted via tool use and validated by Pydantic. Matching schemes...")
 
-    if mock_mode:
-        print(f"\n  Replaying interview with {profile.full_name}...\n")
-        print(THIN)
-        for speaker, text in conversation:
-            if speaker == "InformalID":
-                print(f"\n  [InformalID] {text}")
-            else:
-                print(f"  [{speaker}] {text}")
-        print(f"\n{THIN}")
-        print("\n  Extracting profile + running scheme matcher...\n")
-
-    # Run scheme matcher and JAM assessment with real 2026 data
     schemes = match_schemes(profile)
     jam = jam_assessment(profile)
-
     print(format_card(profile, mock_mode=mock_mode, schemes=schemes, jam=jam))
 
-    eligible_count = sum(1 for s in schemes if s.eligibility_met)
-    total_eligible_inr = sum(s.max_amount_inr for s in schemes if s.eligibility_met)
-    print(f"  SCHEME SUMMARY: {eligible_count} schemes matched | Total potential access: Rs {total_eligible_inr:,}")
-    print()
+    ready = [s for s in schemes if s.eligibility_met]
+    credit = [s.max_amount_inr for s in ready if s.kind == "credit" and s.max_amount_inr]
+    largest = f" | largest single credit line: {format_inr(max(credit))}" if credit else ""
+    print(f"  SCHEMES: {len(ready)} likely eligible, {len(schemes) - len(ready)} after prerequisites or to verify{largest}")
+    print("  (credit lines are alternatives, not additive; insurance cover is separate)\n")
+    if as_json:
+        print(format_json(profile))
 
 
-def main():
-    parser = argparse.ArgumentParser(description="InformalID Demo")
+def main() -> None:
+    parser = argparse.ArgumentParser(description="InformalID demo")
     parser.add_argument("--persona", choices=["domestic", "vendor", "both"], default="both",
-                        help="Which persona to show")
+                        help="Which scripted persona to run (offline mode only)")
+    parser.add_argument("--json", action="store_true", help="Also print the validated profile as JSON")
     args = parser.parse_args()
 
-    print("\n" + "=" * 64)
-    print("  INFORMALID — AI Financial Profiler for Informal Workers")
-    print("  Conversation → Structured Profile → Scheme Eligibility")
-    print("=" * 64)
+    mock_mode = config.is_mock_mode()
+    print(f"\n{BORDER}\n  INFORMALID - AI Financial Profiler for Informal Workers")
+    print(f"  Mode: {'OFFLINE (scripted)' if mock_mode else 'LIVE'}  |  model: {config.CLAUDE_MODEL}\n{BORDER}")
 
-    mode_label = "MOCK (demo)" if config.is_mock_mode() else "LIVE (Claude API)"
-    print(f"\n  Mode: {mode_label}")
-    if config.is_mock_mode():
-        print("  No API key needed — showing realistic sample interviews.")
-
-    personas_to_show = []
-    if args.persona in ("domestic", "both"):
-        personas_to_show.append(("domestic_worker", "Domestic Worker — Meena Devi, Bangalore"))
-    if args.persona in ("vendor", "both"):
-        personas_to_show.append(("street_vendor", "Street Vendor — Ramesh Kumar, Delhi"))
-
-    for persona_key, persona_label in personas_to_show:
-        show_persona(persona_key, persona_label, config.is_mock_mode())
-
-    print("=" * 64)
-    print("  WHAT INFORMALID ENABLES:")
-    print("  • PM SVANidhi loan application packet (street vendors)")
-    print("  • MUDRA micro-loan eligibility assessment")
-    print("  • e-Shram registration intake (accident insurance)")
-    print("  • PM Vishwakarma scheme for artisans")
-    print("  • Microfinance institution onboarding document")
-    print("=" * 64 + "\n")
+    if mock_mode:
+        keys = [PERSONA_KEYS[args.persona]] if args.persona != "both" else list(PERSONAS)
+    else:
+        keys = ["live"]
+    for key in keys:
+        show_persona(key, mock_mode, args.json)
 
 
 if __name__ == "__main__":

@@ -1,237 +1,183 @@
 """
-core/profiler.py — The conversation engine.
+core/profiler.py - the interview + extraction engine.
 
-Two modes:
-  live: uses Claude API to conduct the interview and extract the profile
-  mock: uses hardcoded sample conversations (no API key required)
+Flow (identical live and offline; offline swaps in core.mock.ScriptedClient):
+  1. Ask the 7 fixed questions. If a money answer has no number, Claude writes ONE short follow-up.
+  2. Send the transcript to Claude with the `extract_financial_profile` tool and let it call the tool.
+  3. Validate the tool input with Pydantic. On ValidationError, answer the tool_use with an
+     `is_error` tool_result describing the problem and let Claude correct it (up to MAX_ATTEMPTS).
 
-Extraction uses tool-use forcing — Claude MUST call the extraction tool,
-so the JSON is guaranteed to match the schema. No regex or markdown stripping.
+tool_choice is left on "auto" rather than forced: current Claude models reject forced tool use
+({"type": "tool"} / {"type": "any"}) with a 400. The tool is declared `strict` (schema-valid input),
+the prompt asks for exactly one call, and the code checks that a call happened.
 """
 from __future__ import annotations
-from typing import Literal
 
-from core.models import FinancialProfile
-from core.questions import INTERVIEW_QUESTIONS, SYSTEM_PROMPT, EXTRACTION_PROMPT
+import re
+from typing import Callable, Literal
+
+import anthropic
+from pydantic import ValidationError
+
 import config
-
-
-# ---------------------------------------------------------------------------
-# Mock data — two realistic personas for demo
-# ---------------------------------------------------------------------------
-
-MOCK_CONVERSATION = [
-    ("InformalID", "What is your name, roughly how old are you, and which area do you live or work in?"),
-    ("Meena Devi", "My name is Meena Devi. I am 34 years old. I work in Koramangala, Bangalore."),
-    ("InformalID", "What kind of work do you do right now? How long have you been doing this work?"),
-    ("Meena Devi", "I clean houses. I go to 3 houses every day. I have been doing this for 8 years."),
-    ("InformalID", "How much money do you earn in a typical month? Do you earn from any other sources too?"),
-    ("Meena Devi", "I earn around 9,000 rupees per month. No other work."),
-    ("InformalID", "About how much do you spend each month on rent, food, travel, and other things? Do you manage to save anything?"),
-    ("Meena Devi", "I spend around 6,500 rupees. I save maybe 2,000 to 2,500 rupees."),
-    ("InformalID", "Do you have a bank account or a Jan Dhan account? Do you have an Aadhaar card? Do you own anything valuable?"),
-    ("Meena Devi", "I have Aadhaar. No bank account yet. I have my mobile phone, it cost 4,000 rupees."),
-    ("InformalID", "What other kinds of work have you done before this? What are you good at?"),
-    ("Meena Devi", "Before this I worked in a garment factory for 2 years. I am good at cleaning, cooking, and taking care of children."),
-    ("InformalID", "Which languages do you speak? Is there someone who can vouch for your work?"),
-    ("Meena Devi", "I speak Hindi and some Kannada. Yes, my employer Mrs. Sharma can tell you about my work."),
-]
-
-MOCK_PROFILE = FinancialProfile(
-    full_name="Meena Devi",
-    age=34,
-    occupation="Domestic worker (house cleaning)",
-    years_in_occupation=8,
-    income_sources=[
-        {"description": "House cleaning — 3 households in Koramangala", "frequency": "monthly", "estimated_monthly_inr": 9000}
-    ],
-    total_monthly_income_inr=9000,
-    monthly_expenses_inr=6500,
-    monthly_savings_inr=2000,
-    assets=[
-        {"item": "Mobile phone", "estimated_value_inr": 4000}
-    ],
-    has_bank_account=False,
-    has_aadhaar=True,
-    has_mobile_phone=True,
-    previous_occupations=["Garment factory worker (2 years)"],
-    skills=["Cleaning", "Cooking", "Child care"],
-    references_available=True,
-    location_city_or_area="Koramangala, Bangalore",
-    languages_spoken=["Hindi", "Kannada (basic)"],
-    summary_paragraph=(
-        "Meena Devi is a domestic worker with 8 years of consistent income serving 3 households "
-        "in Koramangala, Bangalore, earning Rs 9,000 per month. "
-        "She saves approximately Rs 2,000 per month, holds an Aadhaar card, and has a reliable employer reference."
-    ),
-    loan_readiness_note=(
-        "Eligible for MUDRA Shishu loan up to Rs 50,000 (no collateral required). "
-        "Opening a Jan Dhan account (free, same-day with Aadhaar) would unlock Rs 10,000 overdraft immediately "
-        "and direct benefit transfer access."
-    ),
+from core.mock import PERSONAS, ScriptedClient, ScriptedWorker
+from core.models import FinancialProfile
+from core.questions import (
+    EXTRACTION_PROMPT,
+    EXTRACTION_TOOL_NAME,
+    EXTRACTION_USER_TEMPLATE,
+    FOLLOWUP_PROMPT,
+    INTERVIEW_QUESTIONS,
+    MONEY_QUESTION_IDS,
+    OPENER,
 )
 
-# Second persona: Ramesh Kumar, a street vendor with a Jan Dhan account
-MOCK_CONVERSATION_2 = [
-    ("InformalID", "What is your name, roughly how old are you, and which area do you live or work in?"),
-    ("Ramesh Kumar", "My name is Ramesh Kumar. I am 42 years old. I have a chaat stall near Lajpat Nagar metro, Delhi."),
-    ("InformalID", "What kind of work do you do right now? How long have you been doing this work?"),
-    ("Ramesh Kumar", "I sell pani puri and chaat. I have been doing this for 11 years. Same spot."),
-    ("InformalID", "How much money do you earn in a typical month? Do you earn from any other sources too?"),
-    ("Ramesh Kumar", "On a good month I earn about 18,000 to 20,000 rupees. Rainy season is less, maybe 12,000. My wife also does some stitching work, maybe 3,000 per month."),
-    ("InformalID", "About how much do you spend each month on rent, food, travel, and other things? Do you manage to save anything?"),
-    ("Ramesh Kumar", "Rent for our room is 4,500. Food and gas for the stall maybe 8,000. Total spending around 15,000. I save maybe 3,000 to 5,000."),
-    ("InformalID", "Do you have a bank account or a Jan Dhan account? Do you have an Aadhaar card? Do you own anything valuable?"),
-    ("Ramesh Kumar", "Yes I have Jan Dhan account in SBI. Aadhaar also I have. I have a second-hand refrigerator for the stall, I paid 8,000 for it. Mobile phone also."),
-    ("InformalID", "What other kinds of work have you done before this? What are you good at?"),
-    ("Ramesh Kumar", "Before I used to work in a restaurant as helper for 4 years. I know cooking, especially chaat and street food. I also know how to talk to customers and manage cash."),
-    ("InformalID", "Which languages do you speak? Is there someone who can vouch for your work?"),
-    ("Ramesh Kumar", "Hindi and a little Punjabi. Yes, the shopkeeper next to my stall, Mr. Verma, he knows me for 10 years."),
-]
+MAX_ATTEMPTS = 3
+Conversation = list[tuple[str, str]]  # (speaker, text)
 
-MOCK_PROFILE_2 = FinancialProfile(
-    full_name="Ramesh Kumar",
-    age=42,
-    occupation="Street food vendor (chaat stall)",
-    years_in_occupation=11,
-    income_sources=[
-        {"description": "Chaat stall near Lajpat Nagar metro", "frequency": "monthly", "estimated_monthly_inr": 18000},
-        {"description": "Wife's tailoring work", "frequency": "monthly", "estimated_monthly_inr": 3000},
-    ],
-    total_monthly_income_inr=21000,
-    monthly_expenses_inr=18000,  # Rs 15K household + ~Rs 3K stall restocking
-    monthly_savings_inr=3000,
-    assets=[
-        {"item": "Second-hand refrigerator (for stall)", "estimated_value_inr": 8000},
-        {"item": "Mobile phone", "estimated_value_inr": 5000},
-    ],
-    has_bank_account=True,
-    has_aadhaar=True,
-    has_mobile_phone=True,
-    previous_occupations=["Restaurant helper (4 years)"],
-    skills=["Street food cooking", "Customer management", "Cash handling"],
-    references_available=True,
-    location_city_or_area="Lajpat Nagar, Delhi",
-    languages_spoken=["Hindi", "Punjabi (basic)"],
-    summary_paragraph=(
-        "Ramesh Kumar is a street food vendor with 11 years of stable operation at the same location "
-        "in Lajpat Nagar, Delhi, with combined household income of Rs 21,000 per month. "
-        "He has a Jan Dhan account, Aadhaar, and a long-standing neighbor reference — strong JAM foundation."
-    ),
-    loan_readiness_note=(
-        "Top candidate for PM SVANidhi Tranche 1 (Rs 15,000, no collateral) and the new SVANidhi Credit Card "
-        "(Rs 30,000 UPI-linked, interest-free, Jan 2026). Also eligible for MUDRA Shishu (Rs 50,000) "
-        "and Jan Dhan overdraft (Rs 10,000 instant). With 11 years tenure and all JAM pillars complete, "
-        "qualifies for MUDRA Kishore (up to Rs 5 lakh) with 2 years of income evidence."
-    ),
-)
-
-MOCK_PERSONAS: dict[str, tuple[list, FinancialProfile]] = {
-    "domestic_worker": (MOCK_CONVERSATION, MOCK_PROFILE),
-    "street_vendor": (MOCK_CONVERSATION_2, MOCK_PROFILE_2),
-}
+_NUMBER_WORD_RE = re.compile(r"\b(hundred|thousand|lakh|lac|hazaar|hazar|sau)\b", re.IGNORECASE)
 
 
-# ---------------------------------------------------------------------------
-# Extraction tool definition — production-grade structured extraction
-# ---------------------------------------------------------------------------
+class ExtractionError(RuntimeError):
+    """The model did not return a valid profile (refusal, truncation, or repeated invalid output)."""
 
-def _build_extraction_tool() -> dict:
-    """
-    Build an Anthropic tool definition from the FinancialProfile schema.
-    Using tool-use forcing guarantees Claude returns valid JSON matching the schema —
-    no regex, no markdown stripping, no json.loads fallbacks needed.
-    """
-    schema = FinancialProfile.model_json_schema()
-    # Remove the example from the schema to keep token count low
-    schema.pop("examples", None)
+
+def build_extraction_tool() -> dict:
+    """The FinancialProfile model, as a strict Claude tool definition."""
     return {
-        "name": "extract_financial_profile",
-        "description": "Extract a structured financial profile from the interview transcript",
-        "input_schema": schema,
+        "name": EXTRACTION_TOOL_NAME,
+        "description": "Record the structured financial profile extracted from the interview transcript.",
+        "input_schema": anthropic.transform_schema(FinancialProfile),
+        "strict": True,
     }
 
 
-# ---------------------------------------------------------------------------
-# Live mode — actual Claude API interview with tool-use extraction
-# ---------------------------------------------------------------------------
+def needs_clarification(question_id: str, answer: str) -> bool:
+    """A money question answered without any number ('business is okay') needs one follow-up."""
+    if question_id not in MONEY_QUESTION_IDS:
+        return False
+    return not (re.search(r"\d", answer) or _NUMBER_WORD_RE.search(answer))
 
-def conduct_interview_live() -> tuple[list[tuple[str, str]], FinancialProfile]:
+
+def _text_of(response) -> str:
+    return "".join(b.text for b in response.content if getattr(b, "type", None) == "text").strip()
+
+
+def conduct_interview(
+    client,
+    ask: Callable[[str], str],
+    *,
+    worker_label: str = "Worker",
+    model: str | None = None,
+    say: Callable[[str, str], None] | None = None,
+) -> tuple[Conversation, FinancialProfile]:
     """
-    Conducts a real interview via Claude API, then extracts profile using tool-use.
-
-    Why tool-use forcing for extraction (not raw JSON prompting):
-      - Claude MUST call the tool → schema is enforced by the API layer
-      - No markdown fences to strip, no json.loads fallbacks
-      - If schema changes, tool definition auto-updates from Pydantic model
-      - Cleaner than prompting for JSON and hoping Claude cooperates
+    Run the whole interview. `ask(prompt)` returns the worker's answer (input() when live, a script offline).
+    `say(speaker, text)` is called for every turn so a UI can print it as it happens.
     """
-    import anthropic
-    client = anthropic.Anthropic(api_key=config.ANTHROPIC_API_KEY)
+    model = model or config.CLAUDE_MODEL
+    say = say or (lambda speaker, text: None)
+    log: Conversation = []
+    messages: list[dict] = [{"role": "user", "content": OPENER}]
 
-    messages: list[dict] = []
-    conversation_log: list[tuple[str, str]] = []
-
-    for q_data in INTERVIEW_QUESTIONS:
-        question = q_data["question"]
-        messages.append({"role": "assistant", "content": question})
-        conversation_log.append(("InformalID", question))
-
-        print(f"\n[InformalID] {question}")
-        answer = input("[You] ").strip()
-        if not answer:
-            answer = "(no answer given)"
-
+    def worker_turn(prompt: str) -> str:
+        say("InformalID", prompt)
+        log.append(("InformalID", prompt))
+        messages.append({"role": "assistant", "content": prompt})
+        answer = ask(prompt).strip() or "(no answer given)"
+        say(worker_label, answer)
+        log.append((worker_label, answer))
         messages.append({"role": "user", "content": answer})
-        conversation_log.append(("You", answer))
+        return answer
 
-        # Gentle clarification for vague financial answers
-        if q_data["id"] in ("income", "expenses_savings") and any(
-            vague in answer.lower() for vague in ["little", "some", "not much", "okay", "fine"]
-        ):
-            followup_response = client.messages.create(
-                model=config.CLAUDE_MODEL,
-                max_tokens=150,
-                system=SYSTEM_PROMPT,
+    for q in INTERVIEW_QUESTIONS:
+        answer = worker_turn(q["question"])
+        if needs_clarification(q["id"], answer):
+            reply = client.messages.create(
+                model=model,
+                max_tokens=1024,                       # thinking tokens count toward max_tokens
+                system=FOLLOWUP_PROMPT,
+                output_config={"effort": "low"},
                 messages=messages,
             )
-            followup = followup_response.content[0].text
-            messages.append({"role": "assistant", "content": followup})
-            conversation_log.append(("InformalID", followup))
-            print(f"\n[InformalID] {followup}")
-            followup_answer = input("[You] ").strip()
-            messages.append({"role": "user", "content": followup_answer})
-            conversation_log.append(("You", followup_answer))
+            followup = _text_of(reply) if reply.stop_reason != "refusal" else ""
+            if followup:
+                worker_turn(followup)
 
-    # --- Structured extraction via tool-use forcing ---
-    conversation_text = "\n".join(
-        f"{speaker}: {text}" for speaker, text in conversation_log
+    profile = extract_profile(client, log, worker_label=worker_label, model=model)
+    return log, profile
+
+
+def extract_profile(
+    client, conversation: Conversation, *, worker_label: str = "Worker", model: str | None = None
+) -> FinancialProfile:
+    """One tool-use extraction with validation feedback. Raises ExtractionError on failure."""
+    model = model or config.CLAUDE_MODEL
+    transcript = "\n".join(
+        f"{'Interviewer' if speaker == 'InformalID' else 'Worker'}: {text}" for speaker, text in conversation
     )
-    extraction_tool = _build_extraction_tool()
+    tool = build_extraction_tool()
+    messages: list[dict] = [{"role": "user", "content": EXTRACTION_USER_TEMPLATE.format(transcript=transcript)}]
+    last_problem = "no attempt made"
 
-    extraction_response = client.messages.create(
-        model=config.CLAUDE_MODEL,
-        max_tokens=2000,
-        system=EXTRACTION_PROMPT,
-        tools=[extraction_tool],
-        tool_choice={"type": "tool", "name": "extract_financial_profile"},
-        messages=[{"role": "user", "content": f"Interview transcript:\n\n{conversation_text}"}],
-    )
+    for _ in range(MAX_ATTEMPTS):
+        response = client.messages.create(
+            model=model,
+            max_tokens=4096,
+            system=EXTRACTION_PROMPT,
+            tools=[tool],
+            tool_choice={"type": "auto", "disable_parallel_tool_use": True},
+            output_config={"effort": "medium"},
+            messages=messages,
+        )
+        if response.stop_reason == "refusal":
+            raise ExtractionError("the model declined to process this transcript")
+        if response.stop_reason == "max_tokens":
+            raise ExtractionError("extraction was cut off by max_tokens")
 
-    # With tool_choice forcing, content[0] is always a ToolUseBlock
-    tool_block = extraction_response.content[0]
-    profile_data = tool_block.input  # Already a dict — no JSON parsing needed
-    profile = FinancialProfile(**profile_data)
-    return conversation_log, profile
+        calls = [b for b in response.content
+                 if getattr(b, "type", None) == "tool_use" and b.name == EXTRACTION_TOOL_NAME]
+        if not calls:
+            last_problem = "the model answered in text instead of calling the tool"
+            messages.append({"role": "assistant", "content": response.content})
+            messages.append({"role": "user", "content": f"Call the {EXTRACTION_TOOL_NAME} tool now with the full profile."})
+            continue
+
+        call = calls[0]
+        try:
+            return FinancialProfile.model_validate(call.input)
+        except ValidationError as err:
+            last_problem = _summarise(err)
+            messages.append({"role": "assistant", "content": response.content})
+            messages.append({"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": call.id, "is_error": True,
+                 "content": f"Invalid profile: {last_problem}. Call the tool again with corrected values."}
+            ]})
+
+    raise ExtractionError(f"no valid profile after {MAX_ATTEMPTS} attempts ({last_problem})")
+
+
+def _summarise(err: ValidationError) -> str:
+    return "; ".join(f"{'.'.join(str(p) for p in e['loc']) or 'profile'}: {e['msg']}" for e in err.errors()[:8])
 
 
 def run_profiler(
-    persona: Literal["domestic_worker", "street_vendor"] = "domestic_worker"
-) -> tuple[list[tuple[str, str]], FinancialProfile]:
-    """
-    Entry point. Picks live or mock mode based on config.
-    In mock mode, 'persona' selects which sample profile to show.
-    """
+    persona: Literal["domestic_worker", "street_vendor"] = "domestic_worker",
+    *,
+    say: Callable[[str, str], None] | None = None,
+) -> tuple[Conversation, FinancialProfile]:
+    """Entry point. Live (stdin + real API) or offline (scripted persona), per config."""
     if config.is_mock_mode():
-        return MOCK_PERSONAS[persona]
-    return conduct_interview_live()
+        p = PERSONAS[persona]
+        return conduct_interview(ScriptedClient(p), ScriptedWorker(p), worker_label=p.worker_name, say=say)
+
+    client = anthropic.Anthropic(api_key=config.ANTHROPIC_API_KEY)
+
+    def ask_stdin(_prompt: str) -> str:
+        return input("[You] ")
+
+    def echo_question_only(speaker: str, text: str) -> None:
+        if speaker == "InformalID":
+            print(f"\n[InformalID] {text}")
+
+    return conduct_interview(client, ask_stdin, worker_label="You", say=say or echo_question_only)
