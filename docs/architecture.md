@@ -1,78 +1,56 @@
-# InformalID — Architecture
-
-## How It Works
+# InformalID - Architecture
 
 ```
-User speaks / types
-        │
-        ▼
-┌─────────────────────────────────┐
-│  core/questions.py              │
-│  7 structured interview         │
-│  questions, in order            │
-└──────────────┬──────────────────┘
-               │
-        ┌──────▼──────┐
-        │  Claude API  │  (or mock)
-        │  (conductor) │
-        └──────┬───────┘
-               │ conversation transcript
-               ▼
-┌─────────────────────────────────┐
-│  Claude API — extraction call   │
-│  EXTRACTION_PROMPT + transcript │
-│  → JSON matching FinancialProfile│
-└──────────────┬──────────────────┘
-               │
-               ▼
-┌─────────────────────────────────┐
-│  core/models.py                 │
-│  FinancialProfile (Pydantic)    │
-│  Validates all fields           │
-└──────────────┬──────────────────┘
-               │
-               ▼
-┌─────────────────────────────────┐
-│  core/formatter.py              │
-│  → Terminal card (human-readable│
-│  → JSON (for downstream systems)│
-└─────────────────────────────────┘
+worker --(7 fixed questions)--> interview loop (core/profiler.py: conduct_interview)
+                                   |  money answer with no number?
+                                   v
+                          Claude: one short follow-up (output_config effort=low)
+                                   |
+        transcript ----------------+
+            |
+            v
+   Claude + tool `extract_financial_profile`            core/profiler.py: extract_profile
+   (strict schema = FinancialProfile; tool_choice auto)
+            |
+            v  tool_use.input
+   Pydantic validation (core/models.py)
+      invalid -> tool_result(is_error) -> Claude retries (max 3)
+      valid   -> FinancialProfile
+            |
+            +--> core/schemes.py  (plain Python rules; no model call) --> SchemeMatch list, JAM score
+            |
+            +--> core/formatter.py --> terminal card / JSON
 ```
 
-## Key Technical Decisions
+## Decisions
 
-### 1. Two-call architecture (interview + extraction)
-The interview is conversational and free-form. The extraction is a separate, structured call
-with a JSON schema enforced by Pydantic. This separation means:
-- The interview can be warm and natural (no schema leaking into the conversation)
-- The extraction is deterministic and validatable
-- If extraction fails to parse, we catch `json.JSONDecodeError` and can retry the extraction
-  call without redoing the interview
+1. **Fixed question script.** The model never decides what to ask, so every profile covers the same
+   fields. Claude's roles are the follow-up for a vague money answer and the structured extraction.
+2. **Tool use for extraction, with the Pydantic model as the schema.** `anthropic.transform_schema`
+   turns `FinancialProfile` into a strict-compatible JSON schema. `strict: true` keeps the input
+   schema-valid; Pydantic still enforces ranges and the savings/income rule, because strict mode moves
+   numeric constraints into descriptions.
+3. **`tool_choice` stays on `auto`.** Current Claude models (Sonnet 5.5, Opus 5.5) return a 400 for forced
+   tool use. The prompt asks for exactly one call and the code checks `stop_reason` and the content
+   blocks (a thinking block may come first, so blocks are read by type, never by position).
+4. **Validation errors go back to the model.** An invalid input is answered with a `tool_result` that has
+   `is_error: true` and the Pydantic message, and the model corrects it. After 3 attempts, or on a
+   refusal or `max_tokens` stop, `ExtractionError` is raised; nothing invalid is used downstream.
+5. **Eligibility is deterministic code.** The extraction prompt forbids naming schemes or amounts, so
+   `core/schemes.py` is the only place scheme facts live. Occupation matching uses only the worker's own
+   occupation and skills (a spouse's trade must not qualify the worker) and word boundaries (so "chai"
+   does not match "chair").
+6. **One code path, two clients.** `core/mock.py` supplies `ScriptedClient`, which returns real SDK
+   `Message` objects. Offline runs and tests go through the same functions as live runs.
 
-### 2. Pydantic for schema enforcement
-Every field in `FinancialProfile` has a type. If Claude returns bad JSON (missing field,
-wrong type), Pydantic raises a `ValidationError` immediately — no silent bad data.
-This is important because the output of this tool may be used for loan decisions.
+## What this is not
 
-### 3. Mock mode by default
-If `ANTHROPIC_API_KEY` is not set, the tool runs entirely offline with a realistic sample
-profile. This means:
-- The demo always works, even in an interview with no internet
-- CI tests never make API calls
-- The mock data is realistic enough to show the full value of the tool
+- Not a credit score or an approval system; the output is a starting document for an officer.
+- Not connected to any government database; scheme rules are encoded by hand with sources in
+  `core/schemes.py` and need periodic re-checking.
 
-## What This Is NOT
+## Data handling
 
-- Not a credit scoring model (no ML, no training data)
-- Not connected to any government database
-- Not a loan approval system
-
-It is a structured intake tool. The output is a starting document — a loan officer
-or microfinance institution still needs to verify the information.
-
-## Data Flow Security
-
-- API key loaded ONLY in `config.py`
-- No user data is logged
-- No data is persisted to disk (profile only exists in memory during the session)
-- The tool never connects to any external service except the Anthropic API (in live mode)
+- The API key is read only in `config.py` (from the environment or a gitignored `.env`).
+- Nothing is persisted; the profile lives in memory for the session.
+- In live mode the transcript is sent to the Anthropic API and nowhere else.
